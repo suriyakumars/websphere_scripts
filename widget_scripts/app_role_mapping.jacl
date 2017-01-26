@@ -1,0 +1,45 @@
+set propfile "roleMapping.properties"
+
+proc getRoleMapping {aPropFile} {
+	java::import java.io.FileReader;
+	java::import java.io.BufferedReader;
+
+	set roles {};
+	set input [java::new BufferedReader [java::new FileReader $aPropFile]];
+	set line [$input readLine];
+	while {$line != ""} {
+		lappend roles $line
+		set line [$input readLine]
+	}
+	return $roles;
+}
+
+proc mapRoles {moduleName role everyOne allAuth uid group} {
+	global AdminApp;
+	global AdminConfig;
+	puts "Mapping the role $role to uid $uid and group $group for module $moduleName";
+	set mapping "{$role $everyOne $allAuth $uid $group}";
+	set map "-MapRolesToUsers { $mapping }";
+	$AdminApp edit $moduleName ${map};
+	$AdminConfig save;
+}
+
+set rolesToMap [getRoleMapping $propfile];
+set shortModuleName "temp";
+set moduleName "temp_1_2_0";
+
+foreach roleToMap $rolesToMap {
+
+	set propFields [split $roleToMap "|"];
+	if {$shortModuleName == [lindex $propFields 0]} {
+		set role [lindex $propFields 1];
+		set everyOne [lindex $propFields 2];
+		set allAuth [lindex $propFields 3];
+		set uid [lindex $propFields 4];
+		set group [lindex $propFields 5];
+		mapRoles $moduleName $role $everyOne $allAuth $uid $group;
+	} else {
+		puts "No webservice security found in this module";
+	}
+}
+

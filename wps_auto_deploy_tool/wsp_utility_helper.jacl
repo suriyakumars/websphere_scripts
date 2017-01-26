@@ -1,0 +1,78 @@
+#
+#Application specific stuff
+#
+
+set scriptPath "/appl/sdp/autodeploytool/scripts";
+
+source $scriptPath/log_helper.jacl;
+
+#Prepares a list with values taken from the endpoint.properties file
+proc getEndpointsInfo {aPropFile} {
+	java::import java.io.FileReader;
+	java::import java.io.BufferedReader;
+
+	set appEndpointInfo {};
+	set input [java::new BufferedReader [java::new FileReader $aPropFile]];
+	set line [$input readLine];
+	while {$line != ""} {
+		lappend appEndpointInfo $line
+		set line [$input readLine]
+	}
+	return $appEndpointInfo;
+}
+
+#Finding the shortmodule name for the ear given for deployment
+proc findShortModuleName {app aPropFile} {
+
+	java::import java.io.FileReader;
+	java::import java.io.BufferedReader;
+
+	set shortModuleName "nothing";
+	set input [java::new BufferedReader [java::new FileReader $aPropFile]];
+	set line [string trim [$input readLine]];
+
+	while {$line != ""} {
+		if {[regexp "_${line}_" ${app} match]} {
+			set shortModuleName $line
+			break
+		}
+		set line [string trim [$input readLine]];
+	}
+	return $shortModuleName;
+}
+
+#Prepares a list for which webserver mapping to be done by reading the webservermap.properties
+proc getAppsToWebMap {aPropFile} {
+	java::import java.io.FileReader;
+	java::import java.io.BufferedReader;
+
+	set appToWebMap {};
+	set input [java::new BufferedReader [java::new FileReader $aPropFile]];
+
+	set line [$input readLine];
+
+	while {$line != ""} {
+		lappend appToWebMap $line
+		set line [$input readLine]
+	}
+	return $appToWebMap;
+}
+
+#Provides the starting weight for the installed module
+proc getStartingWeight {moduleName} {
+	set startWeight 1;
+	if {[regexp "Input" $moduleName match] == 1} {
+		set startWeight 2;
+		debugLog "Starting weight for '$moduleName' is 2";
+	}
+	if {[regexp "InboundAdapters" $moduleName match] == 1} {
+		set startWeight 3;
+		debugLog "Starting weight for '$moduleName' is 3";
+	}
+	if {[regexp "OutputServices" $moduleName match] == 1} {
+		set startWeight 2;
+		debugLog "Starting weight for '$moduleName' is 2";
+	}
+	return $startWeight;
+}
+

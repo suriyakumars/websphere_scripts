@@ -1,0 +1,44 @@
+set scriptPath "/appl/wsp/autodeploy_spc/scripts";
+source $scriptPath/log_helper.jacl;
+
+#Creates a list with values taken from the webServerMap.properties file
+proc fileReader {aPropFile} {
+	java::import java.io.FileReader;
+	java::import java.io.BufferedReader;
+
+	set fileLines {};
+	set input [java::new BufferedReader [java::new FileReader $aPropFile]];
+	set line [$input readLine];
+	while {$line != ""} {
+		lappend fileLines $line
+		set line [$input readLine]
+	}
+	return $fileLines;
+}
+
+#Frames the webserver mapping parameter with given input
+proc frameWebServerMapping {cellName webServers appType map} {
+	foreach webServer $webServers {
+		set entry [split $webServer ","];
+		set type [string trim [lindex $entry 0]];
+		set ihsNode [string trim [lindex $entry 1]];
+		set ihsServer [string trim [lindex $entry 2]];
+		
+		if {$appType == $type} {
+			debugLog "Framing the WebServer Mapping for the module";
+			set mapping "$map+WebSphere:cell=$cellName,node=$ihsNode,server=$ihsServer";
+			set map $mapping;
+			debugLog "WebServer mapping is : $map";
+		}
+	}
+	return $map;
+}
+
+#Writes the given modulename to the completed ears file
+proc writeCompletedEars {moduleName aPropFile} {
+	set data "$moduleName";
+	set filename "$aPropFile";
+	set fileId [open $filename "a+"];
+	puts $fileId $data;
+	close $fileId
+}

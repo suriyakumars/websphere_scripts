@@ -1,0 +1,56 @@
+set cells [$AdminConfig list Cell]
+set memberName [lindex $argv 0]
+set nodeName [lindex $argv 1]
+set action [lindex $argv 2]
+puts "Action: $action"
+
+if {[string compare $action start] == 0}  {
+        puts "Starting $memberName on $nodeName"
+    puts "This will take a while"
+    puts "Starting up..."
+
+        if {[catch {$AdminControl startServer $memberName $nodeName} result_var] == 0} {
+                puts $result_var
+                puts "$action command issued to cluster successfully to $memberName"
+                exit
+        } else {
+                puts "$action command issued to cluster $memberName on $nodeName failed ..BAILING OUT, see Exception"
+                puts "Exception:"
+                puts $result_var
+                exit
+        }
+}
+
+if {[string compare $action stop] == 0}  {
+        puts "Stoping..."
+        if {[catch {$AdminControl stopServer $memberName $nodeName} result_var] == 0} {
+                puts $result_var
+                puts "$action command issued to cluster successfully to $memberName"
+                exit
+        } else {
+                puts "$action command issued to cluster $memberName on $nodeName failed ..BAILING OUT, see Exception"
+                puts "Exception:"
+                puts $result_var
+                exit
+        }
+}
+
+if {[string compare $action status] == 0}  {
+        if {[catch {set servs [$AdminControl queryNames type=Server,name=$memberName,node=$nodeName,*]} result_var] == 0} {
+                if {[llength $servs] == 0} {
+                        puts "Server $memberName is not reachable"
+                        exit
+                } else {
+                        puts "Server $memberName is running"
+                        exit
+                }
+        } else {
+                puts "$action command issued to cluster $memberName on $nodeName failed ..BAILING OUT, see Exception"
+                puts "Exception:"
+                puts $result_var
+                exit
+        }
+}
+
+puts "Command $action not recognized "
+exit

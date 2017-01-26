@@ -1,0 +1,146 @@
+#initialises all 3 log files
+proc initLogFiles {logPath} {
+	set appendMode true;
+	initLogFile activityLog $logPath/activity.log $appendMode;
+	initLogFile errorLog $logPath/error.log $appendMode;
+	initLogFile summaryLog $logPath/summary.log $appendMode;
+}
+
+#Initialises the log file based on the argument
+proc initLogFile {name logFile appendMode} {
+  global $name
+  if {[info exists $name]} {
+    puts "Error: Log file already open, ignoring open '${logFile}'."
+  } else {
+		if {$name == "activityLog"} {
+		# Using a Java FileWriter avoids code page problems with Jacl's puts command
+		set activityLog [java::new {java.io.FileWriter java.lang.String boolean} ${logFile} ${appendMode}]
+		} else {
+			if {$name == "errorLog"} {
+			set errorLog [java::new {java.io.FileWriter java.lang.String boolean} ${logFile} ${appendMode}]
+			} else {
+				if {$name == "summaryLog"} {
+					set summaryLog [java::new {java.io.FileWriter java.lang.String boolean} ${logFile} ${appendMode}]
+				}
+			}
+		}
+	}
+}
+
+#Logs the data in activity.log
+proc debugLog {text} {
+	puts ${text};
+	logger activityLog ${text};
+}
+
+#logs the data in error.log
+proc errorLog {text} {
+	puts ${text};
+	logger errorLog ${text};
+}
+
+#Logs the date in summary.log
+proc summaryLog {text} {
+	puts ${text};
+	logger summaryLog ${text};
+}
+
+#Logs the data based on the argument
+proc logger {name text} {
+	set compTime [clock format [clock seconds] -format "%Y-%m-%d %H.%M.%S"]
+	set data "$compTime $text"
+	if {$name == "activityLog"} {
+		global activityLog env
+		if {[info exists activityLog]} {
+			if {[catch {java::instanceof ${activityLog} java.io.Writer}]} {
+				puts ${activityLog} ${data};
+				flush ${activityLog}
+			} else {
+				${activityLog} write ${data};
+				${activityLog} write $env(line.separator)
+				${activityLog} flush
+			}
+		}
+	} else {
+		if {$name == "errorLog"} {
+			global errorLog env
+			if {[info exists errorLog]} {
+				if {[catch {java::instanceof ${errorLog} java.io.Writer}]} {
+					puts ${errorLog} ${data};
+					flush ${errorLog}
+				} else {
+					${errorLog} write ${data};
+					${errorLog} write $env(line.separator)
+					${errorLog} flush
+				}
+			}
+		} else {
+			if {$name == "summaryLog"} {
+				global summaryLog env
+				if {[info exists summaryLog]} {
+					if {[catch {java::instanceof ${summaryLog} java.io.Writer}]} {
+						puts ${summaryLog} ${text};
+						flush ${summaryLog}
+					} else {
+						${summaryLog} write ${text};
+						${summaryLog} write $env(line.separator)
+						${summaryLog} flush
+					}
+				}
+			}
+		}
+	}
+}
+
+#Closes the log channel based on the argument
+proc closeLogFile {name} {
+	if {$name == "activityLog"} {
+		global activityLog
+		if {![info exists activityLog]} {
+			puts "Error: Log file not open, ignoring close."
+		} else {
+			if {[catch {java::instanceof ${activityLog} java.io.Writer}]} {
+			close ${activityLog}
+			} else {
+				${activityLog} close
+			}
+			unset activityLog
+		}
+	} else {
+		if {$name == "errorLog"} {
+			global errorLog
+			if {![info exists errorLog]} {
+				puts "Error: Log file not open, ignoring close."
+			} else {
+				if {[catch {java::instanceof ${errorLog} java.io.Writer}]} {
+				close ${errorLog}
+				} else {
+				${errorLog} close
+				}
+			unset errorLog
+			}
+		} else {
+			if {$name == "summaryLog"} {
+				global summaryLog
+				if {![info exists summaryLog]} {
+					puts "Error: Log file not open, ignoring close."
+				} else {
+					if {[catch {java::instanceof ${summaryLog} java.io.Writer}]} {
+					close ${summaryLog}
+					} else {
+					${summaryLog} close
+					}
+				unset summaryLog
+				}
+			}
+		}
+	}
+}
+
+#Closes all the opened log channels
+proc closeLogs {} {
+	closeLogFile activityLog;
+	closeLogFile errorLog;
+	closeLogFile summaryLog;
+}
+

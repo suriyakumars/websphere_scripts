@@ -1,0 +1,243 @@
+$AdminControl trace com.ibm.*=all=enabled;
+
+set scriptPath "/appl/wsp/autodeploytool/scripts";
+
+source $scriptPath/log_helper.jacl;
+
+#Get the list of installed versions to uninstall for the given module
+proc getInstalledAppModule {shortModuleName} {
+	global AdminApp
+	java::import java.util.List
+	set installedApps {};
+	if {[catch {set appsCurInstalled [$AdminApp list]} exception] != 0} {
+		errorLog "AdminApp List command failed with the exception : $exception";
+	}
+	foreach installedApplication $appsCurInstalled {
+		if {[regexp "_${shortModuleName}_" ${installedApplication} match]} {
+			lappend installedApps $installedApplication;
+		}
+	}
+	return $installedApps;
+}
+
+#Uninstal module method
+proc uninstallModule {uninstallAppModule} {
+	global AdminConfig;
+	java::try {
+		set uninsAppName [string trim $uninstallAppModule];
+		debugLog "Uninstalling the module $uninsAppName";
+		#source $scriptHome/bpcTemplates.jacl;
+		#uninstall $uninsAppName;
+		debugLog "Saving uninstall config changes"
+		$AdminConfig save;
+	} catch {Exception e} {
+		errorLog "Uninstallation failed with exception : $e";
+	}
+}
+
+#Install module method
+proc installAppModule {earLoc parameters} {
+	global AdminApp;
+	global AdminConfig;
+	
+	debugLog "Installation of the module is started with parameters : $parameters";
+	if {[catch {$AdminApp install $earLoc $parameters} exception] != 0} {
+		errorLog "Install failed for the module with exception : $exception"
+	}
+	debugLog "Saving the installation changes";
+	if {[catch {$AdminConfig save} exception] != 0} {
+		errorLog "Save failed after Install with exception : $exception"
+	}
+}
+
+#Validating whether the module is uninstalled or not
+proc isModuleUninstalled {appName} {
+	set uninstallStatus [isAppModuleExists $appName];
+	set isUninstalled true;
+	if {$uninstallStatus} {
+		set isUninstalled false;
+	}
+	return $isUninstalled;
+}
+
+#Validating whether the module is installed or not
+proc isModuleInstalled {appName} {
+	set isInstalled [isAppModuleExists $appName];
+	return $isInstalled;
+}
+
+#Check whether the module is available in dmgr
+proc isAppModuleExists {appName} {
+	global AdminApp;
+	set isExists false;
+	
+	if {[catch {set appsCurInstalled [$AdminApp list]} exception] != 0} {
+		errorLog "AdminApp List command failed with the exception : $exception";
+	}
+	foreach installedApplication $appsCurInstalled {
+		if {[regexp ${installedApplication} ${appName} match]} {
+			set isExists true;
+			break;
+		}
+	}
+	return $isExists;
+}
+
+#Synchronise the nodes for that env. Gets the list from DMGR using AdminTask and synchronises only the managed nodes
+proc synchNode {} {
+	global AdminConfig;
+	global AdminTask;
+	global AdminControl;
+	
+	if {[catch {set  nodelist [$AdminTask listManagedNodes]} exception] != 0} {
+		errorLog "AdminTask list managed nodes failed with exception = $exception";
+	}
+	foreach node $nodelist {
+		if {[catch {set Sync1 [$AdminControl completeObjectName type=NodeSync,node=$node,*]} exception] != 0} {
+			errorLog "AdminControl get object name failed with exception = $exception";
+		}
+		if {[catch {$AdminControl invoke $Sync1 sync} exception] != 0} {
+			errorLog "Synchronisation failed with exception = $exception";
+		} else {
+			debugLog "Synchronisation completed succesfully for the node '$node'";
+		}
+	}
+}
+
+#Configures the endpoint if it is OutputModule
+proc configureEndpoints {moduleName shortModuleName appEndpointInfo} {
+	global AdminConfig;
+	global AdminTask;
+	if {[regexp "Output" $moduleName match] == 1} {
+		debugLog "Checking for the endpoints";
+		set endpointConfigured 0;
+		#it contains 3 comma delimited fields - ModuleName,ImportName,Endpoint e.g. G2OutputModule,Import1,http://some.new.endpoint
+		#loop through the records and match on ModuleName
+		foreach endpointInfo $appEndpointInfo {
+			set propFields [split $endpointInfo ","];
+			if {$shortModuleName == [lindex $propFields 0]} {
+				set importName [lindex $propFields 1];
+				set endpoint [lindex $propFields 2];
+				debugLog "Found Endpoint : $endpoint for Import : $importName in Module : $shortModuleName";
+				set params [list -moduleName $shortModuleName -applicationName $moduleName -import $importName -endpoint $endpoint];
+				if {[catch {$AdminTask modifySCAImportWSBinding $params} exception] != 0} {
+					errorLog "Endpoint configuration failed with exception : $exception : for import $importName";
+				}
+				debugLog "Saving endpoint configurations";
+				if {[catch {$AdminConfig save} exception] != 0} {
+					errorLog "Save failed after Install with exception : $exception"
+				}
+				set endpointConfigured 1;
+			}
+		}
+		if {$endpointConfigured == 1} {
+			debugLog "Endpoints are configured for the module '$moduleName'";
+		} else {
+			debugLog "If this section is empty then no endpoints have been found for the module $moduleName";
+		}
+	}
+}
+
+#Configures the starting weight for the module
+proc configureStartingWeight {moduleName startWeight} {
+	global AdminConfig;
+	
+	debugLog "Configuring the Starting Weight for the module $moduleName";
+	if {[catch {set dep [$AdminConfig getid /Deployment:$moduleName/]} exception] != 0} {
+		errorLog "AdminConfig getId failed with exception : $exception";
+	}
+	if {[catch {set depObject [$AdminConfig showAttribute $dep deployedObject]} exception] != 0} {
+		errorLog "AdminConfig showAttribute failed with exception : $exception";
+	}
+	set attributeValuePair [list [list startingWeight $startWeight]];
+	if {[catch {$AdminConfig modify $depObject $attributeValuePair} exception] != 0} {
+		errorLog "Starting weight config failed with exception : $exception";
+	}
+	if {[catch {$AdminConfig save} exception] != 0} {
+		errorLog "Save failed after Install with exception : $exception"
+	}
+	debugLog "Starting weight configured for the module $moduleName";
+}
+
+#Maps the webservers to the Web Modules available in the installed module
+proc mapToWebServers {moduleName shortModuleName appToMap mapModule} {
+	global AdminConfig;
+	global AdminApp
+	
+		debugLog "Checking for WebServer Mapping";
+		foreach webServerMap $appToMap {
+			if {$shortModuleName == $webServerMap} {
+				debugLog "Web Modules found, mapping the web modules to the webservers $mapModule";
+				if {[catch {$AdminApp edit $moduleName ${mapModule}} exception] != 0} {
+					errorLog "WebServer mapping failed with exception : $exception";
+				}
+				if {[catch {$AdminConfig save} exception] != 0} {
+					errorLog "Save failed after Install with exception : $exception"
+				}
+				debugLog "WebServer mapping completed";
+			}
+		}
+}
+
+proc getCellName {} {
+	global AdminControl;
+	if {[catch {set cellName [$AdminControl getCell]} exception] != 0} {
+		errorLog "Finding cellName failed with exception : $exception";
+	}
+	return $cellName;
+}
+
+proc getWebServerMapping {cellName map} {
+	global AdminConfig;
+	
+	if {[catch {set webservers [$AdminConfig list WebServer]} exception] != 0} {
+		errorLog "Listing webserver failed with exception : $exception";
+	}
+	foreach webserver $webservers {
+		if {[catch {set webservername [$AdminConfig showAttribute $webserver server]} exception] != 0} {
+			errorLog "Getting Attribute of webserver $webserver failed with exception : $exception";
+		}
+		set name [split $webservername "("];
+		set ihsServer [lindex $name 0];
+		set holder1 [string first "/nodes/" $webservername]
+		set holder2 [string first "/servers/" $webservername]
+		set webservernode [string range $webservername [expr $holder1+7] [expr $holder2-1]];
+		set mapping "$map+WebSphere:cell=$cellName,node=$webservernode,server=$ihsServer";
+		set map $mapping;
+		#debugLog "WebServer mapping is : $map";
+	}
+	return $map;
+}
+
+#Configured the timeout values for the endpoints
+proc configureEndpointTimeOut {moduleName shortModuleName appTimeoutInfo} {
+	global AdminConfig;
+	global AdminApp;
+	foreach timeoutInfo $appTimeoutInfo {
+		set propFields [split $timeoutInfo ","];
+		if {$shortModuleName == [lindex $propFields 0]} {
+			set jarName [lindex $propFields 1];
+			set ejbName [lindex $propFields 2];
+			set webService [lindex $propFields 3];
+			set port [lindex $propFields 4];
+			set timeout [lindex $propFields 5];
+			set userId [lindex $propFields 6];
+			set password [lindex $propFields 7];
+			debugLog "Found Timeout : $timeout for port $port";
+			if {$userId != ""} {
+				set params [list $jarName $ejbName $webService $port $timeout $userId $password];
+			} else {
+				set params [list $jarName $ejbName $webService $port $timeout];
+			}
+			set parameters "-WebServicesClientBindPortInfo {{$params}}";
+			#puts $parameters;
+			if {[catch {$AdminApp edit $moduleName ${parameters}} exception] != 0} {
+				errorLog "Endpoint Timeout configuration failed with exception : $exception : for port $port";
+			}
+			debugLog "Saving timeout configurations";
+			if {[catch {$AdminConfig save} exception] != 0} {
+				errorLog "Save failed after timeout config with exception : $exception"
+			}
+		}
+	}
+}

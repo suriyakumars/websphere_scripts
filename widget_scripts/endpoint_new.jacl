@@ -1,0 +1,46 @@
+$AdminControl trace com.ibm.*=all=enabled;
+
+set shortModuleName [lindex $argv 0];
+set importName [lindex $argv 1];
+set endpoint [lindex $argv 2];
+
+proc getInstalledAppModule {shortModuleName} {
+	global AdminApp
+	java::import java.util.List
+	set installedApps {};
+	if {[catch {set appsCurInstalled [$AdminApp list]} exception] != 0} {
+		puts "AdminApp List command failed with the exception : $exception";
+	}
+	foreach installedApplication $appsCurInstalled {
+		if {[regexp "_${shortModuleName}_" ${installedApplication} match]} {
+			lappend installedApps $installedApplication;
+		}
+	}
+	return $installedApps;
+}
+
+proc configureEndpoints {moduleName shortModuleName importName endpoint} {
+	global AdminConfig;
+	global AdminTask;
+	puts "Configuring Endpoint for module : $moduleName with Endpoint : $endpoint for Import : $importName";
+	set params [list -moduleName $shortModuleName -applicationName $moduleName -import $importName -endpoint $endpoint];
+	if {[catch {$AdminTask modifySCAImportWSBinding $params} exception] != 0} {
+		puts "Endpoint configuration failed with exception : $exception : for import $importName";
+	}
+	puts "Saving endpoint configurations";
+	if {[catch {$AdminConfig save} exception] != 0} {
+		puts "Save failed after Install with exception : $exception"
+	}
+	puts "Endpoint config completed";
+}
+
+set moduleNames [getInstalledAppModule $shortModuleName];
+
+if {[llength ${moduleNames}] != 0} {
+	
+	foreach moduleName $moduleNames {
+		configureEndpoints $moduleName $shortModuleName $importName $endpoint
+	}
+} else {
+	puts "No module found with name : $shortModuleName";
+}

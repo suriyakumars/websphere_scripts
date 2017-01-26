@@ -1,0 +1,179 @@
+global AdminApp;
+global AdminConfig;
+global AdminTask;
+global AdminControl;
+
+$AdminControl trace com.ibm.*=all=enabled;
+
+#Initialising the variables
+set home "/appl/wsp/autodeploytool";
+set scriptPath "$home/scripts";
+set propPath "$home/properties";
+set customEndPointsFile "$propPath/endpoint.properties";
+set webServerMapFile "$propPath/webserver_modules.properties";
+set endpointTimeOutFile "$propPath/timeout.properties";
+
+# Initialising the app helper jacl
+source $scriptPath/install_helper.jacl;
+source $scriptPath/wsp_utility_helper.jacl;
+source $scriptPath/log_helper.jacl;
+source $scriptPath/bpcTemplates.jacl;
+
+#Load the arguments received for the deployment
+set appName [string trim [lindex $argv 0]];
+set earsDir [lindex $argv 1];
+set installDir [lindex $argv 2];
+set shortModuleName [lindex $argv 3];
+set logPath [lindex $argv 4];
+set clusterName [lindex $argv 5];
+set clusterName2 [lindex $argv 6];
+set clusterName3 [lindex $argv 7];
+
+#Initialise all the log files for this deployment session
+initLogFiles $logPath;
+
+#Print the received arguments for reference
+debugLog "Received the arguments : Module name '$appName', Cluster name '$clusterName', EAR location '$earsDir', Short Module name '$shortModuleName', Log dir '$logPath'";
+debugLog "Directory to install the application : $installDir";
+
+#contains .ear in the name
+set insAppName [string trim $appName];
+
+#strips .ear from the name
+regexp "(.*)\.ear" $insAppName match subMatch
+set moduleName $subMatch;
+
+#Deployment of the Module
+debugLog "Deployment process started for '$moduleName'";
+debugLog "============================== START INSTALLING - $moduleName ==============================";
+
+###########################
+#Uninstalling the module
+###########################
+
+debugLog "Checking for existing installations of '$moduleName'";
+
+set uninsAppNames [getInstalledAppModule $shortModuleName];
+
+if {[llength ${uninsAppNames}] != 0} {
+	
+	foreach uninstallApp $uninsAppNames {
+		set uninsAppName [string trim $uninstallApp];
+		debugLog "Uninstalling the module $uninsAppName";
+		uninstall $uninsAppName;
+		debugLog "Saving uninstall config changes"
+		$AdminConfig save;
+		synchNode;
+		set isUninstallSuccess [isModuleUninstalled $uninstallApp];
+		if {$isUninstallSuccess} {
+			debugLog "Uninstall completed successfully - Proceeding to Installation";
+		} else {
+			errorLog "Uninstall Failed - Module not uninstalled properly and still available in the repository";
+		}
+	}
+} else {
+	debugLog "Proceeding to the Installation since it is a new module";
+	set isUninstallSuccess true;
+}
+
+###########################
+#Installation of the module
+###########################
+
+if {$isUninstallSuccess} {
+	set cellName [getCellName];
+	set clusterMapping "WebSphere:cell=$cellName,cluster=$clusterName";
+	if {$clusterName2 != ""} {
+		set clusterMapping "$clusterMapping+WebSphere:cell=$cellName,cluster=$clusterName2";
+		if {$clusterName3 != ""} {
+			set clusterMapping "$clusterMapping+WebSphere:cell=$cellName,cluster=$clusterName3";
+		}
+	}
+	set appMapping "{.* .* $clusterMapping}";
+	set parameters [list -appname $moduleName -installed.ear.destination $installDir -MapModulesToServers $appMapping];
+	set earLocation $earsDir/$insAppName;
+	debugLog "Installing the module $moduleName";
+	installAppModule $earLocation $parameters;
+	synchNode;
+	
+	set isInstallSuccess [isModuleInstalled $moduleName];
+	if {$isInstallSuccess} {
+		debugLog "Installation completed successfully for the module '$moduleName'";
+	} else {
+		debugLog "Installation of the module '$moduleName' failed";
+	}
+	
+} else {
+	errorLog "Module didnt uninstall properly, So the installation process is terminated";
+	set isInstallSuccess false;
+}
+
+###########################
+#Post deployment configurations (Endpoint, Starting Weight & Web Server Mapping)
+###########################
+
+if {$isInstallSuccess} {
+	
+	#Endpoint configuration
+	set appEndpointInfo [getEndpointsInfo $customEndPointsFile];
+	configureEndpoints $moduleName $shortModuleName $appEndpointInfo;
+	
+	#Endpoint timeout config
+	set appTimeoutInfo [getEndpointsInfo $endpointTimeOutFile];
+	configureEndpointTimeOut $moduleName $shortModuleName $appTimeoutInfo;
+	
+	#Starting weight configuration
+	set startingWeight [getStartingWeight $moduleName];
+	if {$startingWeight != 1} {
+		configureStartingWeight $moduleName $startingWeight;
+	}
+	
+	#WebServer Mapping
+	set cellName [getCellName];
+	set map "WebSphere:cell=$cellName,cluster=$clusterName";
+	if {$clusterName2 != ""} {
+		set map "$map+WebSphere:cell=$cellName,cluster=$clusterName2";
+		if {$clusterName3 != ""} {
+			set map "$map+WebSphere:cell=$cellName,cluster=$clusterName3";
+		}
+	}
+	set mapping [getWebServerMapping $cellName $map];
+	set mapModule ".* .*.war,.* $mapping";
+	set ihsMapping "-MapModulesToServers {{$mapModule}}";
+	set appToMap [getAppsToWebMap $webServerMapFile];
+	mapToWebServers $moduleName $shortModuleName $appToMap $ihsMapping;
+	
+} else {
+	errorLog "Installation failed / terminated. So skipping the post deployment configurations";
+}
+synchNode;
+
+###########################
+#Writing summary log
+###########################
+
+if {$isUninstallSuccess} {
+	if {$isInstallSuccess} {
+		if {[llength ${uninsAppNames}] != 0} {
+			infoLog "SUCCESS:: $moduleName (Uninstalled existing module - $uninsAppNames)";
+		} else {
+			infoLog "SUCCESS:: $moduleName";
+		}
+	} else {
+		if {[llength ${uninsAppNames}] != 0} {
+			infoLog "FAILED::  $moduleName - failed at install step (Uninstalled existing module - $uninsAppNames)";
+		} else {
+			infoLog "FAILED::  $moduleName - failed at install step";
+		}
+	}
+} else {
+	if {[llength ${uninsAppNames}] != 0} {
+		infoLog "FAILED::  $moduleName - failed at uninstall step (Uninstalled existing module - $uninsAppNames)";
+	} else {
+		infoLog "FAILED::  $moduleName - failed at uninstall step";
+	}
+}
+
+#Close the opened log files for this deployment session
+debugLog "============================== END INSTALLING - $moduleName ==============================";
+closeLogs;

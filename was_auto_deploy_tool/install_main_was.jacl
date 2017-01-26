@@ -1,0 +1,175 @@
+global AdminApp;
+global AdminConfig;
+global AdminTask;
+global AdminControl;
+
+$AdminControl trace com.ibm.*=all=enabled;
+
+#Initialising the variables
+set home "/appl/wsp/autodeploy_spc";
+set scriptPath "$home/scripts";
+set propPath "$home/properties";
+set webServersFile "$propPath/webServerMap.properties";
+set roleMappingFile "$propPath/roleMapping.properties";
+set completedEarsFile "$home/workspace/dynamic_prop/completedEars.properties";
+
+# Initialising the app helper jacl
+source $scriptPath/install_helper.jacl;
+source $scriptPath/wsp_utility_helper.jacl;
+source $scriptPath/log_helper.jacl;
+
+#Load the arguments received for the deployment
+set insAppName [string trim [lindex $argv 0]];
+set earsDir [lindex $argv 1];
+set installDir [lindex $argv 2];
+set shortModuleName [lindex $argv 3];
+set logPath [lindex $argv 4];
+set appType [lindex $argv 5];
+set clusterName [lindex $argv 6];
+set clusterName2 [lindex $argv 7];
+set clusterName3 [lindex $argv 8];
+
+#Initialise all the log files for this deployment session
+initLogFiles $logPath;
+
+#Print the received arguments for reference
+debugLog "Received the arguments : Module name '$insAppName', Cluster name '$clusterName', EAR location '$earsDir', Short Module name '$shortModuleName', Log dir '$logPath', Application Type '$appType'";
+debugLog "Directory to install the application : $installDir";
+
+#strips .ear from the name
+regexp "(.*)\.ear" $insAppName match subMatch
+set moduleName $subMatch;
+
+###########################
+#Uninstalling the module
+###########################
+debugLog "============================== START DEPLOYMENT - $moduleName ==============================";
+
+debugLog "Checking for existing installations of '$moduleName'";
+
+set uninsAppNames [getInstalledAppModule $shortModuleName];
+
+if {[llength ${uninsAppNames}] != 0} {
+	
+	foreach uninstallApp $uninsAppNames {
+		debugLog "Uninstalling the module $uninstallApp";
+		uninstallModule $uninstallApp;
+		synchNode;
+		set isUninstallSuccess [isModuleUninstalled $uninstallApp];
+		if {$isUninstallSuccess} {
+			debugLog "Uninstall completed successfully - Proceeding to Installation";
+		} else {
+			errorLog "Uninstall Failed - Module not uninstalled properly and still available in the repository";
+		}
+	}
+} else {
+	debugLog "Proceeding to the Installation since it is a new module";
+	set isUninstallSuccess true;
+}
+
+###########################
+#Installation of the module
+###########################
+
+if {$isUninstallSuccess} {
+	set cellName [getCellName];
+	set clusterMapping "WebSphere:cell=$cellName,cluster=$clusterName";
+	if {$clusterName2 != ""} {
+		set clusterMapping "$clusterMapping+WebSphere:cell=$cellName,cluster=$clusterName2";
+		if {$clusterName3 != ""} {
+			set clusterMapping "$clusterMapping+WebSphere:cell=$cellName,cluster=$clusterName3";
+		}
+	}
+	set appMapping "{.* .* $clusterMapping}";
+	set parameters [list -appname $moduleName -installed.ear.destination $installDir -MapModulesToServers $appMapping];
+	set earLocation $earsDir/$insAppName;
+	debugLog "Installing the module $moduleName";
+	installAppModule $earLocation $parameters;
+	synchNode;
+	
+	set isInstallSuccess [isModuleInstalled $moduleName];
+	if {$isInstallSuccess} {
+		debugLog "Installation completed successfully for the module '$moduleName'";
+	} else {
+		errorLog "Installation of the module '$moduleName' failed";
+	}
+	
+} else {
+	debugLog "Module didnt uninstall properly, So the installation process is terminated";
+	set isInstallSuccess false;
+}
+
+###########################
+#Post deployment configurations (Web Server Mapping)
+###########################
+#WebServer Mapping
+if {$isInstallSuccess} {
+	set isWebModule [getAppsToWebMap $moduleName];
+	if {$isWebModule} {
+		debugLog "Web modules found, webserver mapping will continue";
+		set cellName [getCellName];
+		set map "WebSphere:cell=$cellName,cluster=$clusterName";
+		if {$clusterName2 != ""} {
+			set map "$map+WebSphere:cell=$cellName,cluster=$clusterName2";
+			if {$clusterName3 != ""} {
+				set map "$map+WebSphere:cell=$cellName,cluster=$clusterName3";
+			}
+		}
+		set webServers [fileReader $webServersFile];
+		set mapping [frameWebServerMapping $cellName $webServers $appType $map];
+		set mapModule ".* .*.war,.* $mapping";
+		set ihsMapping "-MapModulesToServers {{$mapModule}}";
+		mapToWebServers $moduleName $ihsMapping;
+		
+	} else {
+		debugLog "WebServer mapping NOT required for the module $moduleName";
+	}
+	
+	set rolesToMap [fileReader $roleMappingFile];
+	foreach roleToMap $rolesToMap {
+		set propFields [split $roleToMap "|"];
+		if {$shortModuleName == [lindex $propFields 0]} {
+			set role [lindex $propFields 1];
+			set everyOne [lindex $propFields 2];
+			set allAuth [lindex $propFields 3];
+			set uid [lindex $propFields 4];
+			set group [lindex $propFields 5];
+			mapRoles $moduleName $role $everyOne $allAuth $uid $group;
+		} else {
+			debugLog "No webservice security found in this module";
+		}
+	}
+} else {
+	debugLog "Installation failed / terminated. So skipping the post deployment configurations";
+}
+synchNode;
+
+###########################
+#Writing summary log
+###########################
+
+if {$isUninstallSuccess} {
+	if {$isInstallSuccess} {
+		if {[llength ${uninsAppNames}] != 0} {
+			summaryLog "SUCCESS:: $moduleName (Uninstalled existing module - $uninsAppNames)";
+		} else {
+			summaryLog "SUCCESS:: $moduleName";
+		}
+	} else {
+		if {[llength ${uninsAppNames}] != 0} {
+			summaryLog "FAILED::  $moduleName - failed at install step (Uninstalled existing module - $uninsAppNames)";
+		} else {
+			summaryLog "FAILED::  $moduleName - failed at install step";
+		}
+	}
+} else {
+	if {[llength ${uninsAppNames}] != 0} {
+		summaryLog "FAILED::  $moduleName - failed at uninstall step (Uninstalled existing module - $uninsAppNames)";
+	} else {
+		summaryLog "FAILED::  $moduleName - failed at uninstall step";
+	}
+}
+writeCompletedEars $insAppName $completedEarsFile;
+#Close the opened log files for this deployment session
+debugLog "============================== END DEPLOYMENT - $moduleName ==============================";
+closeLogs;

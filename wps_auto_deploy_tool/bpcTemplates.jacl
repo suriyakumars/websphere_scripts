@@ -1,0 +1,293 @@
+#
+# Licensed Materials - Property of IBM
+# 5655-FLW (C) Copyright IBM Corporation 2004, 2009. All Rights Reserved.
+# US Government Users Restricted Rights- Use, duplication or disclosure
+# restricted by GSA ADP Schedule Contract with IBM Corp.
+#
+# Customised by Suriya Subramanian
+#
+
+#*******************************************************************************************************
+# Load library procedures
+#*******************************************************************************************************
+if {[array names env "wbi.install.root"] == ""} {
+  # workaround until the WBI installer sets 'wbi.install.root'
+  set env(wbi.install.root) [pwd]
+  while {![file isdirectory "$env(wbi.install.root)/ProcessChoreographer/config"]} {
+    set dir [file dirname $env(wbi.install.root)]
+    if {${dir} == $env(wbi.install.root)} {
+      set env(wbi.install.root) $env(was.install.root)
+      break
+    }
+    set env(wbi.install.root) ${dir}
+  }
+}
+set "bpelib.getopt" 1
+if {[file exists "$env(wbi.install.root)/ProcessChoreographer/config/bpelib.jacl"]} {
+  source "$env(wbi.install.root)/ProcessChoreographer/config/bpelib.jacl"
+} else {
+  puts "bpelib.jacl not found. Aborting..."
+  exit 1
+}
+
+#*******************************************************************************************************
+# List all process and task templates (may be restricted to a given enterprise application)
+#*******************************************************************************************************
+proc listBPCTemplates {appName} {
+  global AdminConfig
+
+  set templates {}
+
+  foreach bpt [$AdminConfig list ProcessComponent] {
+    # extract application name, for example
+    # claimsHandlingProcess(cells/vienna/applications/BPELClaimsHandling.ear/deployments/BPELClaimsHandling|deployment-bpc.xml#ProcessComponent_1073642403600)
+    #                                                                                    +----------------+
+    if {[regexp {.*/([^/|]*)|} ${bpt} match appName1]} {
+      if {${appName} == "" || ${appName} == ${appName1}} {
+        set validFrom [java::new {com.ibm.bpe.api.UTCDate long} [showAttribute ${bpt} validFrom]]
+        lappend templates [list ${appName1} "Process template '[showAttribute ${bpt} name]', valid from [${validFrom} toXsdString] (UTC)"]
+      }
+    }
+  }
+
+  foreach htt [$AdminConfig list TaskComponent] {
+    if {[regexp {.*/([^/|]*)|} ${htt} match appName1]} {
+      if {${appName} == "" || ${appName} == ${appName1}} {
+        set validFrom [java::new {com.ibm.bpe.api.UTCDate long} [showAttribute ${htt} validFrom]]
+        lappend templates [list ${appName1} "Task template '[showAttribute ${htt} name]', [showAttribute ${htt} namespace], valid from [${validFrom} toXsdString] (UTC)"]
+      }
+    }
+  }
+
+  set templates [lsort -index 0 ${templates}]
+
+  puts "Found [llength ${templates}] template(s):"
+  foreach template ${templates} {
+    puts "[lindex ${template} 0]: [lindex ${template} 1]"
+  }
+
+  puts "Done."
+}
+
+#*******************************************************************************************************
+# Change the state for all process and task templates of a given enterprise application
+#*******************************************************************************************************
+proc changeBPCTemplateState {appName message bfmMethod htmMethod state} {
+  global env AdminConfig AdminControl
+
+  # 1. Find the enterprise application ----------------------------------------
+
+  array set target [uniqueDeploymentTarget ${appName}]
+
+  if {[array names target] == ""} {
+    return 1
+  }
+
+  # 2. Find the BPC MBeans to connect to --------------------------------------
+
+  # May be a 'ServerTarget' with attributes 'name' and 'nodeName' or a 'ClusterTarget' with attribute 'name'.
+  # Get all attributes and convert them to an array ('$AdminConfig show' for a non-existant attribute throws an
+  # error, but now we can use 'array names')
+
+  set bfmMBeans {}
+  set htmMBeans {}
+  if {[array names target "nodeName"] == ""} {
+    set clusterName $target(name)
+    set cluster [$AdminConfig getid "/Cell:$env(local.cell)/ServerCluster:${clusterName}/"]
+    foreach member [$AdminConfig list ClusterMember ${cluster}] {
+      set nodeName [showAttribute ${member} "nodeName"]
+      set serverName [showAttribute ${member} "memberName"]
+      set bfmMBean [$AdminControl completeObjectName "type=InternalProcessContainer,node=${nodeName},process=${serverName},*"]
+      if {${bfmMBean} != ""} {
+        lappend bfmMBeans ${bfmMBean}
+      }
+      set htmMBean [$AdminControl completeObjectName "type=InternalTaskManager,node=${nodeName},process=${serverName},*"]
+      if {${htmMBean} != ""} {
+        lappend htmMBeans ${htmMBean}
+      }
+    }
+    set scopeName "cluster '${clusterName}'"
+  } else {
+    set nodeName $target(nodeName)
+    set serverName $target(name)
+    set bfmMBean [$AdminControl completeObjectName "type=InternalProcessContainer,node=${nodeName},process=${serverName},*"]
+    if {${bfmMBean} != ""} {
+      lappend bfmMBeans ${bfmMBean}
+    }
+    set htmMBean [$AdminControl completeObjectName "type=InternalTaskManager,node=${nodeName},process=${serverName},*"]
+    if {${htmMBean} != ""} {
+      lappend htmMBeans ${htmMBean}
+    }
+    set scopeName "server '${serverName}' of node '${nodeName}'"
+  }
+
+  msg "Appplication '${appName}' is deployed on ${scopeName}."
+
+  # claimsHandlingProcess(cells/vienna/applications/BPELClaimsHandling.ear/deployments/BPELClaimsHandling|deployment.xml#Deployment_1073642403600)
+  # ==>
+  # (cells/vienna/applications/BPELClaimsHandling.ear/deployments/BPELClaimsHandling:
+  log "Debug: target=$target(deployment)"
+  regexp "${appName}(\\(\[^\\|\]*)\\|" $target(deployment) match deployment
+  if {![info exists deployment]} {
+    error "  Error: xmi::id not matched ($target(deployment))"
+  }
+  log "Debug: deployment=${deployment}"
+
+  # 3. Collect all process templates for the given application ----------------
+
+  set templates {}
+  foreach template [$AdminConfig list ProcessComponent] { ;# unfortunately, 'ProcessComponent' cannot be scoped
+    # try to match by id, for example
+    # claimsHandlingProcess(cells/vienna/applications/BPELClaimsHandling.ear/deployments/BPELClaimsHandling|deployment-bpc.xml#ProcessComponent_1073642403600)
+    #                      +-------------------------------------------------------------------------------+
+    log "Debug: checking ${template}"
+    if {[regexp "\[^(\]*\\${deployment}\\|" ${template} match]} {
+      log "Debug: ${template} matched '${match}'"
+      lappend templates ${template}
+    }
+  }
+
+  if {[llength ${templates}] == 0} {
+    msg "  No process templates found in '${appName}'."
+  } elseif {[llength ${bfmMBeans}] == 0} {
+    error "Error: Could not find a ProcessContainer MBean on ${scopeName}"
+  } else {
+    # ${::Help} all $bfmMBean
+    # For each template, update the state in both the Process Choreographer database
+    # and in the WebSphere configuration (which is used by the Admin Console).
+    foreach template ${templates} {
+      set validFrom [java::new {com.ibm.bpe.api.UTCDate long} [showAttribute ${template} validFrom]]
+      msg "  ${message} '[showAttribute $template name]', valid from [${validFrom} toString]"
+      # @TBD:
+      # [5/30/03 15:47:05:137 CEST] 30321f3b ConnectionMan W J2CA0075W: An active transaction should be present while processing method allocateMCWrapper.
+      # [5/30/03 15:47:05:167 CEST] 30321f3b ConnectionMan W J2CA0075W: An active transaction should be present while processing method initializeForUOW.
+      foreach bfmMBean ${bfmMBeans} {
+        $AdminControl invoke ${bfmMBean} ${bfmMethod} [list [showAttribute ${template} "name"] [showAttribute ${template} "validFrom"]]
+      }
+      $AdminConfig modify [showAttribute $template "stateManagement"] [list [list "initialState" "${state}"]]
+    }
+  }
+
+  # 4. Collect all task templates for the given application ----------------
+
+  set templates {}
+  foreach template [$AdminConfig list TaskComponent] { ;# unfortunately, 'TaskComponent' cannot be scoped
+    # try to match by id, for example
+    # claimsHandlingProcess(cells/vienna/applications/BPELClaimsHandling.ear/deployments/BPELClaimsHandling|deployment-bpc.xml#ProcessComponent_1073642403600)
+    #                      +-------------------------------------------------------------------------------+
+    log "Debug: checking ${template}"
+    if {[regexp "\[^(\]*\\${deployment}\\|" ${template} match]} {
+      log "Debug: ${template} matched '${match}'"
+      lappend templates ${template}
+    }
+  }
+
+  if {[llength ${templates}] == 0} {
+    msg "  No task templates found in '${appName}'."
+  } elseif {[llength ${htmMBeans}] == 0} {
+    error "Error: Could not find a TaskManager MBean on ${scopeName}"
+  } else {
+    # For each template, update the state in both the Process Choreographer database
+    # and in the WebSphere configuration (which is used by the Admin Console).
+    foreach template ${templates} {
+      set validFrom [java::new {com.ibm.bpe.api.UTCDate long} [showAttribute ${template} validFrom]]
+      msg "  ${message} '[showAttribute ${template} name]', valid from [${validFrom} toString], namespace [showAttribute ${template} namespace]"
+      # @TBD:
+      # [5/30/03 15:47:05:137 CEST] 30321f3b ConnectionMan W J2CA0075W: An active transaction should be present while processing method allocateMCWrapper.
+      # [5/30/03 15:47:05:167 CEST] 30321f3b ConnectionMan W J2CA0075W: An active transaction should be present while processing method initializeForUOW.
+      foreach htmMBean ${htmMBeans} {
+        $AdminControl invoke ${htmMBean} ${htmMethod} [list [showAttribute ${template} "name"] [showAttribute ${template} "validFrom"] [showAttribute ${template} "namespace"]]
+      }
+      $AdminConfig modify [showAttribute ${template} "stateManagement"] [list [list "initialState" "${state}"]]
+    }
+  }
+
+  return 0
+}
+
+#*******************************************************************************************************
+# Start all process and task templates of a given enterprise application
+#*******************************************************************************************************
+proc startBPCTemplates {appName} {
+  global AdminConfig
+  if {[catch { changeBPCTemplateState ${appName} "Starting" "startProcessTemplate" "startTaskTemplate" "START" } error] == 0} {
+    $AdminConfig save
+  } else {
+    $AdminConfig reset
+    msg "Error starting ${appName} templates: ${error}."
+  }
+}
+
+#*******************************************************************************************************
+# Stop all process and task templates of a given enterprise application
+#*******************************************************************************************************
+proc stopBPCTemplates {appName} {
+  global AdminConfig
+  if {[catch { changeBPCTemplateState  ${appName} "Stopping" "stopProcessTemplate" "stopTaskTemplate" "STOP" } error] == 0} {
+    $AdminConfig save
+  } else {
+    $AdminConfig reset
+    msg "Error stopping ${appName} templates: ${error}."
+  }
+}
+
+#*******************************************************************************************************
+# Stop all process and task templates of a given enterprise application, then uninstall it
+#*******************************************************************************************************
+proc uninstall {appName force} {
+  global AdminApp AdminConfig
+  if {${force}} {
+    set bfmMethodName "stopProcessTemplateAndDeleteInstancesForced"
+    set htmMethodName "stopTaskTemplateAndDeleteInstancesForced"
+    if {[catch { changeBPCTemplateState  ${appName} "Stopping" ${bfmMethodName} ${htmMethodName} "STOP";
+                 $AdminApp uninstall ${appName} } error] == 0} {
+      $AdminConfig save
+    } else {
+      $AdminConfig reset
+      msg "Error stopping and force uninstalling ${appName}: ${error}."
+    }
+  } else {
+    # As of 6.2, uninstall implicitely stops templates
+    if {[catch { $AdminApp uninstall ${appName} } error] == 0} {
+      $AdminConfig save
+    } else {
+      $AdminConfig reset
+      msg "Error stopping and uninstalling ${appName}: ${error}."
+    }
+  }
+}
+
+#*******************************************************************************************************
+# Check for invocation errors then execute
+#*******************************************************************************************************
+puts ""
+if {![info exists list] && (![info exists start] && ![info exists stop] && ![info exists uninstall] || [connectionStatus] != "CONNECTED")} {
+  msg "Usage: wsadmin -f bpcTemplates.jacl -list \[<app_name>\]"
+  msg "       wsadmin -f bpcTemplates.jacl -start <app_name>"
+  msg "       wsadmin -f bpcTemplates.jacl -stop <app_name>"
+  msg "       wsadmin -f bpcTemplates.jacl -uninstall <app_name> \[-force\]"
+  msg ""
+  msg "Either lists all process and task templates; or starts, stops, and uninstalls all"
+  msg "process and task templates of a given enterprise application."
+  msg "Before uninstalling, the process and task templates of the enterprise application"
+  msg "will be stopped."
+  msg "CAUTION: If you specify -force, all instances of the passed enterprise application's"
+  msg "templates are deleted -- even if they are currently running."
+  msg ""
+  msg "Note that for commands other than 'list' the scripting client must be connected"
+  msg "to a running server. That is, you may only use wsadmin's '-conntype NONE' parameter"
+  msg "with the '-list' parameter."
+  msg ""
+  exit 1
+}
+
+if {[info exists list]} {
+  listBPCTemplates ${list}
+} elseif {[info exists start]} {
+  startBPCTemplates ${start}
+} elseif {[info exists stop]} {
+  stopBPCTemplates ${stop}
+} elseif {[info exists uninstall]} {
+  uninstall ${uninstall} [info exists force]
+}
+
